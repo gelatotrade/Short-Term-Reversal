@@ -1,0 +1,29 @@
+"""
+ML Trading Bot v3.1 - Konfiguration
+"""
+
+# Aktien mit langer Historie
+TICKERS = [
+    'AAPL', 'MSFT', 'JPM', 'JNJ', 'WMT',
+    'PG', 'HD', 'DIS', 'BAC', 'INTC',
+    'IBM', 'ORCL', 'CSCO', 'PFE', 'KO',
+    'PEP', 'MCD', 'NKE', 'CAT', 'MMM'
+]
+
+LOOKBACK_YEARS = 25
+REVERSAL_LOOKBACK = 5
+HOLDING_PERIOD = 5
+
+TRAIN_TEST_SPLIT = 0.7
+RANDOM_STATE = 42
+
+INITIAL_CAPITAL = 100000
+POSITION_SIZE = 0.10
+MAX_POSITIONS = 5
+TRANSACTION_COST = 0.001
+
+STOP_LOSS = 0.05
+TAKE_PROFIT = 0.08
+TRAILING_STOP = 0.03
+
+MIN_CONFIDENCE = 0.53

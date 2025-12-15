@@ -1,0 +1,297 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// SHORT-TERM REVERSAL STRATEGY MIT FIBONACCI-RETRACEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+// Diese Strategie identifiziert kurzfristige Übertreibungen (Oversold/Overbought)
+// und nutzt Fibonacci-Levels als Bestätigungs- und Exit-Punkte.
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy("Short-Term Reversal + Fibonacci", 
+     overlay=true, 
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=1,
+     pyramiding=0,
+     calc_on_every_tick=true)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EINGABE-PARAMETER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Reversal Detection Settings ===
+grp_reversal = "🔄 Reversal-Erkennung"
+lookback_period = input.int(5, "Lookback-Periode (Tage)", minval=1, maxval=20, group=grp_reversal, tooltip="Zeitraum für die Berechnung der kurzfristigen Bewegung")
+price_move_threshold = input.float(5.0, "Preisbewegung-Schwelle (%)", minval=1.0, maxval=20.0, step=0.5, group=grp_reversal, tooltip="Minimale prozentuale Bewegung für Reversal-Signal")
+use_volume_filter = input.bool(true, "Volumen-Filter aktivieren", group=grp_reversal)
+volume_multiplier = input.float(1.5, "Volumen-Multiplikator", minval=1.0, maxval=5.0, step=0.1, group=grp_reversal, tooltip="Erforderliches Volumen relativ zum Durchschnitt")
+
+// === RSI Settings ===
+grp_rsi = "📊 RSI-Indikator"
+rsi_length = input.int(14, "RSI-Länge", minval=2, maxval=50, group=grp_rsi)
+rsi_oversold = input.int(30, "RSI Oversold-Level", minval=10, maxval=40, group=grp_rsi)
+rsi_overbought = input.int(70, "RSI Overbought-Level", minval=60, maxval=90, group=grp_rsi)
+use_rsi_confirmation = input.bool(true, "RSI als Bestätigung nutzen", group=grp_rsi)
+
+// === Fibonacci Settings ===
+grp_fib = "📐 Fibonacci-Einstellungen"
+fib_lookback = input.int(20, "Fibonacci Lookback-Periode", minval=5, maxval=100, group=grp_fib, tooltip="Zeitraum zur Bestimmung von Swing High/Low")
+show_fib_levels = input.bool(true, "Fibonacci-Levels anzeigen", group=grp_fib)
+fib_level_236 = input.float(0.236, "Fib 23.6%", group=grp_fib)
+fib_level_382 = input.float(0.382, "Fib 38.2%", group=grp_fib)
+fib_level_500 = input.float(0.500, "Fib 50.0%", group=grp_fib)
+fib_level_618 = input.float(0.618, "Fib 61.8%", group=grp_fib)
+fib_level_786 = input.float(0.786, "Fib 78.6%", group=grp_fib)
+
+// === Take Profit & Stop Loss ===
+grp_risk = "🎯 Risiko-Management"
+use_fib_tp = input.bool(true, "Fibonacci-Level als Take Profit", group=grp_risk)
+tp_fib_level = input.string("50.0%", "TP Fibonacci-Level", options=["23.6%", "38.2%", "50.0%", "61.8%", "78.6%"], group=grp_risk)
+fixed_tp_percent = input.float(3.0, "Fester Take Profit (%)", minval=0.5, maxval=20.0, step=0.5, group=grp_risk)
+sl_percent = input.float(2.5, "Stop Loss (%)", minval=0.5, maxval=10.0, step=0.5, group=grp_risk)
+use_trailing_stop = input.bool(false, "Trailing Stop aktivieren", group=grp_risk)
+trailing_percent = input.float(1.5, "Trailing Stop (%)", minval=0.5, maxval=5.0, step=0.5, group=grp_risk)
+
+// === Zeitfilter ===
+grp_time = "⏰ Zeitfilter"
+use_time_filter = input.bool(false, "Zeitfilter aktivieren", group=grp_time)
+start_hour = input.int(9, "Start-Stunde", minval=0, maxval=23, group=grp_time)
+end_hour = input.int(16, "End-Stunde", minval=0, maxval=23, group=grp_time)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BERECHNUNGEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Kurzfristige Preisbewegung ===
+price_change_pct = ((close - close[lookback_period]) / close[lookback_period]) * 100
+is_strong_decline = price_change_pct <= -price_move_threshold
+is_strong_rally = price_change_pct >= price_move_threshold
+
+// === RSI-Berechnung ===
+rsi_value = ta.rsi(close, rsi_length)
+is_oversold = rsi_value <= rsi_oversold
+is_overbought = rsi_value >= rsi_overbought
+
+// === Volumen-Filter ===
+avg_volume = ta.sma(volume, 20)
+high_volume = volume >= avg_volume * volume_multiplier
+volume_condition = use_volume_filter ? high_volume : true
+
+// === Fibonacci-Berechnungen ===
+swing_high = ta.highest(high, fib_lookback)
+swing_low = ta.lowest(low, fib_lookback)
+fib_range = swing_high - swing_low
+
+// Fibonacci-Levels berechnen (für Long-Positionen: Retracement vom High)
+fib_236_level = swing_high - (fib_range * fib_level_236)
+fib_382_level = swing_high - (fib_range * fib_level_382)
+fib_500_level = swing_high - (fib_range * fib_level_500)
+fib_618_level = swing_high - (fib_range * fib_level_618)
+fib_786_level = swing_high - (fib_range * fib_level_786)
+
+// Fibonacci-Levels für Short (Retracement vom Low)
+fib_236_short = swing_low + (fib_range * fib_level_236)
+fib_382_short = swing_low + (fib_range * fib_level_382)
+fib_500_short = swing_low + (fib_range * fib_level_500)
+fib_618_short = swing_low + (fib_range * fib_level_618)
+fib_786_short = swing_low + (fib_range * fib_level_786)
+
+// === Preis nahe Fibonacci-Level prüfen ===
+fib_tolerance = fib_range * 0.02  // 2% Toleranz
+
+near_fib_support = (math.abs(close - fib_382_level) <= fib_tolerance) or 
+                   (math.abs(close - fib_500_level) <= fib_tolerance) or 
+                   (math.abs(close - fib_618_level) <= fib_tolerance)
+
+near_fib_resistance = (math.abs(close - fib_382_short) <= fib_tolerance) or 
+                      (math.abs(close - fib_500_short) <= fib_tolerance) or 
+                      (math.abs(close - fib_618_short) <= fib_tolerance)
+
+// === Zeitfilter ===
+current_hour = hour(time)
+time_allowed = use_time_filter ? (current_hour >= start_hour and current_hour <= end_hour) : true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAL-GENERIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Basis-Signale ===
+base_long_signal = is_strong_decline and volume_condition and time_allowed
+base_short_signal = is_strong_rally and volume_condition and time_allowed
+
+// === RSI-Bestätigung hinzufügen ===
+rsi_confirmed_long = use_rsi_confirmation ? (base_long_signal and is_oversold) : base_long_signal
+rsi_confirmed_short = use_rsi_confirmation ? (base_short_signal and is_overbought) : base_short_signal
+
+// === Finale Signale (optional mit Fibonacci-Bestätigung) ===
+long_signal = rsi_confirmed_long
+short_signal = rsi_confirmed_short
+
+// === Fibonacci-verstärkte Signale (Bonus-Konfidenz) ===
+strong_long_signal = long_signal and near_fib_support
+strong_short_signal = short_signal and near_fib_resistance
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TAKE PROFIT LEVEL BESTIMMUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Funktion um TP-Level basierend auf Auswahl zu bestimmen
+get_fib_tp_level_long() =>
+    switch tp_fib_level
+        "23.6%" => fib_236_level
+        "38.2%" => fib_382_level
+        "50.0%" => fib_500_level
+        "61.8%" => fib_618_level
+        "78.6%" => fib_786_level
+        => fib_500_level
+
+get_fib_tp_level_short() =>
+    switch tp_fib_level
+        "23.6%" => fib_236_short
+        "38.2%" => fib_382_short
+        "50.0%" => fib_500_short
+        "61.8%" => fib_618_short
+        "78.6%" => fib_786_short
+        => fib_500_short
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STRATEGIE-AUSFÜHRUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Long Entry ===
+if long_signal and strategy.position_size == 0
+    entry_price = close
+    
+    // Stop Loss
+    stop_loss_price = entry_price * (1 - sl_percent / 100)
+    
+    // Take Profit (Fibonacci oder fest)
+    take_profit_price = use_fib_tp ? get_fib_tp_level_long() : entry_price * (1 + fixed_tp_percent / 100)
+    
+    // Sicherstellen dass TP über Entry liegt
+    if take_profit_price <= entry_price
+        take_profit_price := entry_price * (1 + fixed_tp_percent / 100)
+    
+    strategy.entry("Long", strategy.long, comment=strong_long_signal ? "STRONG LONG" : "Long")
+    
+    if use_trailing_stop
+        strategy.exit("Long Exit", "Long", stop=stop_loss_price, trail_price=entry_price * (1 + trailing_percent / 100), trail_offset=entry_price * trailing_percent / 100 / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "Long", stop=stop_loss_price, limit=take_profit_price)
+
+// === Short Entry ===
+if short_signal and strategy.position_size == 0
+    entry_price = close
+    
+    // Stop Loss
+    stop_loss_price = entry_price * (1 + sl_percent / 100)
+    
+    // Take Profit (Fibonacci oder fest)
+    take_profit_price = use_fib_tp ? get_fib_tp_level_short() : entry_price * (1 - fixed_tp_percent / 100)
+    
+    // Sicherstellen dass TP unter Entry liegt
+    if take_profit_price >= entry_price
+        take_profit_price := entry_price * (1 - fixed_tp_percent / 100)
+    
+    strategy.entry("Short", strategy.short, comment=strong_short_signal ? "STRONG SHORT" : "Short")
+    
+    if use_trailing_stop
+        strategy.exit("Short Exit", "Short", stop=stop_loss_price, trail_price=entry_price * (1 - trailing_percent / 100), trail_offset=entry_price * trailing_percent / 100 / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=stop_loss_price, limit=take_profit_price)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Fibonacci-Levels plotten ===
+plot(show_fib_levels ? fib_236_level : na, "Fib 23.6%", color=color.new(color.gray, 60), linewidth=1, style=plot.style_linebr)
+plot(show_fib_levels ? fib_382_level : na, "Fib 38.2%", color=color.new(color.green, 50), linewidth=1, style=plot.style_linebr)
+plot(show_fib_levels ? fib_500_level : na, "Fib 50.0%", color=color.new(color.orange, 50), linewidth=2, style=plot.style_linebr)
+plot(show_fib_levels ? fib_618_level : na, "Fib 61.8%", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(show_fib_levels ? fib_786_level : na, "Fib 78.6%", color=color.new(color.purple, 60), linewidth=1, style=plot.style_linebr)
+
+// === Swing High/Low ===
+plot(show_fib_levels ? swing_high : na, "Swing High", color=color.new(color.blue, 70), linewidth=1, style=plot.style_linebr)
+plot(show_fib_levels ? swing_low : na, "Swing Low", color=color.new(color.blue, 70), linewidth=1, style=plot.style_linebr)
+
+// === Entry-Signale markieren ===
+plotshape(long_signal and strategy.position_size[1] == 0, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(short_signal and strategy.position_size[1] == 0, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+
+// === Starke Signale hervorheben ===
+plotshape(strong_long_signal and strategy.position_size[1] == 0, "Strong Long", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal)
+plotshape(strong_short_signal and strategy.position_size[1] == 0, "Strong Short", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size=size.normal)
+
+// === Hintergrund bei Extrembedingungen ===
+bgcolor(is_oversold and is_strong_decline ? color.new(color.green, 90) : na, title="Oversold Zone")
+bgcolor(is_overbought and is_strong_rally ? color.new(color.red, 90) : na, title="Overbought Zone")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO-TABELLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table info_table = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(info_table, 0, 0, "📊 REVERSAL STATUS", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, "", text_color=color.white, text_size=size.small)
+    
+    // RSI
+    rsi_color = is_oversold ? color.green : is_overbought ? color.red : color.gray
+    table.cell(info_table, 0, 1, "RSI (" + str.tostring(rsi_length) + ")", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 1, str.tostring(rsi_value, "#.##"), text_color=rsi_color, text_size=size.tiny)
+    
+    // Preisbewegung
+    move_color = is_strong_decline ? color.green : is_strong_rally ? color.red : color.gray
+    table.cell(info_table, 0, 2, "Bewegung (" + str.tostring(lookback_period) + "d)", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 2, str.tostring(price_change_pct, "#.##") + "%", text_color=move_color, text_size=size.tiny)
+    
+    // Volumen
+    vol_status = high_volume ? "✓ Hoch" : "Normal"
+    table.cell(info_table, 0, 3, "Volumen", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 3, vol_status, text_color=high_volume ? color.green : color.gray, text_size=size.tiny)
+    
+    // Fibonacci-Nearest
+    table.cell(info_table, 0, 4, "Fib 50%", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 4, str.tostring(fib_500_level, "#.##"), text_color=color.orange, text_size=size.tiny)
+    
+    // Aktuelles Signal
+    signal_text = long_signal ? "🟢 LONG" : short_signal ? "🔴 SHORT" : "⚪ KEIN"
+    signal_color = long_signal ? color.green : short_signal ? color.red : color.gray
+    table.cell(info_table, 0, 5, "Signal", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 5, signal_text, text_color=signal_color, text_size=size.tiny)
+    
+    // Signalstärke
+    strength_text = strong_long_signal ? "⭐ STARK" : strong_short_signal ? "⭐ STARK" : "Normal"
+    table.cell(info_table, 0, 6, "Stärke", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 6, strength_text, text_color=strong_long_signal or strong_short_signal ? color.yellow : color.gray, text_size=size.tiny)
+    
+    // Position
+    pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(info_table, 0, 7, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 7, pos_text, text_color=pos_color, text_size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS (für Strategien: alert() statt alertcondition())
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal and strategy.position_size[1] == 0
+    alert("🟢 SHORT-TERM REVERSAL: Long-Signal erkannt! RSI: " + str.tostring(rsi_value, "#.##") + ", Bewegung: " + str.tostring(price_change_pct, "#.##") + "%", alert.freq_once_per_bar)
+
+if short_signal and strategy.position_size[1] == 0
+    alert("🔴 SHORT-TERM REVERSAL: Short-Signal erkannt! RSI: " + str.tostring(rsi_value, "#.##") + ", Bewegung: " + str.tostring(price_change_pct, "#.##") + "%", alert.freq_once_per_bar)
+
+if strong_long_signal and strategy.position_size[1] == 0
+    alert("⭐🟢 STARKES Long-Signal mit Fibonacci-Bestätigung! Preis nahe Fib-Support.", alert.freq_once_per_bar)
+
+if strong_short_signal and strategy.position_size[1] == 0
+    alert("⭐🔴 STARKES Short-Signal mit Fibonacci-Bestätigung! Preis nahe Fib-Resistance.", alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENDE
+// ══════════════════════════════════════════════════════════════════════════════

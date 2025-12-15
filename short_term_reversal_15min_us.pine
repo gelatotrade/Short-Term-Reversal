@@ -1,0 +1,381 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// SHORT-TERM REVERSAL STRATEGY - 15 MIN US STOCKS
+// ══════════════════════════════════════════════════════════════════════════════
+// Optimiert für Intraday-Trading auf US-Aktien im 15-Minuten-Timeframe
+// Mit Fibonacci-Retracement, VWAP-Filter und US-Marktzeiten
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy("Short-Term Reversal 15M US", 
+     shorttitle="STR-15M-US",
+     overlay=true, 
+     initial_capital=25000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=5,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EINGABE-PARAMETER (Optimiert für 15-Min US Stocks)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Reversal Detection ===
+grp_reversal = "🔄 Reversal-Erkennung"
+lookback_bars = input.int(8, "Lookback-Bars", minval=2, maxval=20, group=grp_reversal, tooltip="Anzahl 15-Min-Bars für Bewegungsberechnung (8 Bars = 2 Stunden)")
+price_threshold = input.float(1.5, "Preisbewegung-Schwelle (%)", minval=0.5, maxval=5.0, step=0.25, group=grp_reversal, tooltip="Minimale Bewegung für Signal")
+use_atr_threshold = input.bool(true, "ATR-basierte Schwelle", group=grp_reversal, tooltip="Dynamische Schwelle basierend auf Volatilität")
+atr_multiplier = input.float(1.5, "ATR-Multiplikator", minval=0.5, maxval=3.0, step=0.25, group=grp_reversal)
+
+// === Volumen-Filter ===
+grp_volume = "📊 Volumen-Filter"
+use_volume_filter = input.bool(true, "Volumen-Filter aktivieren", group=grp_volume)
+volume_mult = input.float(1.3, "Volumen-Multiplikator", minval=1.0, maxval=3.0, step=0.1, group=grp_volume)
+use_rvol = input.bool(true, "Relative Volume (RVOL) nutzen", group=grp_volume, tooltip="Vergleicht mit gleichem Zeitpunkt vorheriger Tage")
+
+// === RSI Settings ===
+grp_rsi = "📈 RSI-Einstellungen"
+rsi_length = input.int(7, "RSI-Länge", minval=2, maxval=20, group=grp_rsi, tooltip="Kürzere Periode für Intraday")
+rsi_oversold = input.int(25, "RSI Oversold", minval=10, maxval=35, group=grp_rsi)
+rsi_overbought = input.int(75, "RSI Overbought", minval=65, maxval=90, group=grp_rsi)
+use_rsi = input.bool(true, "RSI-Bestätigung", group=grp_rsi)
+
+// === VWAP Filter ===
+grp_vwap = "📍 VWAP-Filter"
+use_vwap = input.bool(true, "VWAP-Filter aktivieren", group=grp_vwap, tooltip="Long nur unter VWAP, Short nur über VWAP")
+vwap_buffer = input.float(0.1, "VWAP-Buffer (%)", minval=0.0, maxval=1.0, step=0.05, group=grp_vwap)
+
+// === EMA Trend Filter ===
+grp_ema = "📉 Trend-Filter"
+use_ema_filter = input.bool(true, "EMA-Filter aktivieren", group=grp_ema)
+ema_fast = input.int(9, "EMA Fast", minval=5, maxval=20, group=grp_ema)
+ema_slow = input.int(21, "EMA Slow", minval=15, maxval=50, group=grp_ema)
+trade_with_trend = input.bool(false, "Nur mit Trend handeln", group=grp_ema, tooltip="Aus = Counter-Trend (Reversal), An = Trend-Following")
+
+// === Fibonacci Settings ===
+grp_fib = "📐 Fibonacci"
+fib_lookback = input.int(50, "Fibonacci Lookback-Bars", minval=20, maxval=100, group=grp_fib, tooltip="50 Bars = ~12.5 Stunden")
+show_fib = input.bool(true, "Fibonacci-Levels anzeigen", group=grp_fib)
+fib_confirmation = input.bool(true, "Fibonacci-Bestätigung", group=grp_fib, tooltip="Verstärkt Signal wenn nahe Fib-Level")
+
+// === Risk Management ===
+grp_risk = "🎯 Risiko-Management"
+sl_percent = input.float(0.8, "Stop Loss (%)", minval=0.3, maxval=3.0, step=0.1, group=grp_risk)
+tp_percent = input.float(1.2, "Take Profit (%)", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+use_atr_sl = input.bool(true, "ATR-basierter Stop Loss", group=grp_risk)
+atr_sl_mult = input.float(1.5, "ATR SL-Multiplikator", minval=0.5, maxval=3.0, step=0.25, group=grp_risk)
+rr_ratio = input.float(1.5, "Risk/Reward Ratio", minval=1.0, maxval=4.0, step=0.25, group=grp_risk)
+use_trailing = input.bool(true, "Trailing Stop", group=grp_risk)
+trail_percent = input.float(0.5, "Trailing (%)", minval=0.2, maxval=2.0, step=0.1, group=grp_risk)
+
+// === US Market Session Filter ===
+grp_session = "⏰ US-Handelszeiten"
+use_session = input.bool(true, "Session-Filter aktivieren", group=grp_session)
+session_start = input.session("0945-1530", "Handelszeit (EST)", group=grp_session, tooltip="Vermeidet erste 15 Min und letzte 30 Min")
+avoid_lunch = input.bool(true, "Lunch-Zeit meiden (12:00-13:00)", group=grp_session)
+no_friday_afternoon = input.bool(true, "Freitag Nachmittag meiden", group=grp_session)
+
+// === Position Management ===
+grp_pos = "💼 Position"
+max_trades_day = input.int(4, "Max. Trades pro Tag", minval=1, maxval=10, group=grp_pos)
+close_eod = input.bool(true, "Positionen EOD schließen", group=grp_pos, tooltip="Schließt alle Positionen vor Marktschluss")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BERECHNUNGEN
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === ATR für Volatilitäts-Anpassung ===
+atr_value = ta.atr(14)
+atr_percent = (atr_value / close) * 100
+
+// === Dynamische Schwelle ===
+effective_threshold = use_atr_threshold ? atr_percent * atr_multiplier : price_threshold
+
+// === Preisbewegung berechnen ===
+price_change = ((close - close[lookback_bars]) / close[lookback_bars]) * 100
+is_oversold_move = price_change <= -effective_threshold
+is_overbought_move = price_change >= effective_threshold
+
+// === RSI ===
+rsi_val = ta.rsi(close, rsi_length)
+rsi_oversold_cond = rsi_val <= rsi_oversold
+rsi_overbought_cond = rsi_val >= rsi_overbought
+
+// === Volumen ===
+vol_sma = ta.sma(volume, 20)
+high_volume = volume >= vol_sma * volume_mult
+
+// RVOL (vereinfacht - Vergleich mit durchschnittlichem Volumen der letzten 5 Tage zur gleichen Zeit)
+vol_avg_5d = ta.sma(volume, 5 * 26)  // ~5 Tage bei 26 Bars pro Tag
+rvol = volume / vol_avg_5d
+high_rvol = rvol >= 1.2
+
+volume_ok = use_volume_filter ? (use_rvol ? high_rvol : high_volume) : true
+
+// === VWAP ===
+vwap_val = ta.vwap(hlc3)
+vwap_buffer_val = vwap_val * (vwap_buffer / 100)
+below_vwap = close < (vwap_val - vwap_buffer_val)
+above_vwap = close > (vwap_val + vwap_buffer_val)
+
+vwap_long_ok = use_vwap ? below_vwap : true
+vwap_short_ok = use_vwap ? above_vwap : true
+
+// === EMA Trend ===
+ema_fast_val = ta.ema(close, ema_fast)
+ema_slow_val = ta.ema(close, ema_slow)
+uptrend = ema_fast_val > ema_slow_val
+downtrend = ema_fast_val < ema_slow_val
+
+// Für Counter-Trend Reversal: Long wenn Downtrend (überverkauft), Short wenn Uptrend (überkauft)
+ema_long_ok = use_ema_filter ? (trade_with_trend ? uptrend : downtrend) : true
+ema_short_ok = use_ema_filter ? (trade_with_trend ? downtrend : uptrend) : true
+
+// === Fibonacci Levels ===
+swing_high = ta.highest(high, fib_lookback)
+swing_low = ta.lowest(low, fib_lookback)
+fib_range = swing_high - swing_low
+
+fib_236 = swing_high - (fib_range * 0.236)
+fib_382 = swing_high - (fib_range * 0.382)
+fib_500 = swing_high - (fib_range * 0.500)
+fib_618 = swing_high - (fib_range * 0.618)
+fib_786 = swing_high - (fib_range * 0.786)
+
+// Prüfen ob Preis nahe Fib-Level (für Bestätigung)
+fib_tolerance = fib_range * 0.015  // 1.5% Toleranz
+
+near_fib_support = (math.abs(close - fib_382) <= fib_tolerance) or 
+                   (math.abs(close - fib_500) <= fib_tolerance) or 
+                   (math.abs(close - fib_618) <= fib_tolerance) or
+                   (math.abs(close - fib_786) <= fib_tolerance)
+
+near_fib_resistance = (math.abs(close - fib_236) <= fib_tolerance) or 
+                      (math.abs(close - fib_382) <= fib_tolerance) or 
+                      (math.abs(close - fib_500) <= fib_tolerance)
+
+// === Session Filter ===
+in_session = use_session ? not na(time(timeframe.period, session_start, "America/New_York")) : true
+
+// Lunch-Zeit vermeiden (12:00-13:00 EST)
+current_hour_est = hour(time, "America/New_York")
+current_minute = minute(time)
+is_lunch = current_hour_est == 12
+lunch_ok = avoid_lunch ? not is_lunch : true
+
+// Freitag Nachmittag vermeiden
+is_friday = dayofweek(time) == dayofweek.friday
+is_friday_afternoon = is_friday and current_hour_est >= 14
+friday_ok = no_friday_afternoon ? not is_friday_afternoon : true
+
+session_ok = in_session and lunch_ok and friday_ok
+
+// === EOD Close ===
+is_near_close = current_hour_est == 15 and current_minute >= 45
+should_close_eod = close_eod and is_near_close
+
+// === Trade Counter (vereinfacht) ===
+var int trades_today = 0
+var int last_trade_day = 0
+current_day = dayofmonth(time)
+
+if current_day != last_trade_day
+    trades_today := 0
+    last_trade_day := current_day
+
+can_trade = trades_today < max_trades_day
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SIGNAL-GENERIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Basis-Signale ===
+base_long = is_oversold_move and volume_ok and session_ok and can_trade
+base_short = is_overbought_move and volume_ok and session_ok and can_trade
+
+// === Mit RSI-Bestätigung ===
+rsi_long = use_rsi ? (base_long and rsi_oversold_cond) : base_long
+rsi_short = use_rsi ? (base_short and rsi_overbought_cond) : base_short
+
+// === Mit VWAP und EMA Filter ===
+filtered_long = rsi_long and vwap_long_ok and ema_long_ok
+filtered_short = rsi_short and vwap_short_ok and ema_short_ok
+
+// === Finale Signale ===
+long_signal = filtered_long
+short_signal = filtered_short
+
+// === Verstärkte Signale (Fibonacci-Bestätigung) ===
+strong_long = fib_confirmation ? (long_signal and near_fib_support) : false
+strong_short = fib_confirmation ? (short_signal and near_fib_resistance) : false
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STOP LOSS & TAKE PROFIT BERECHNUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ATR-basierter oder fester Stop Loss
+sl_distance = use_atr_sl ? (atr_value * atr_sl_mult) : (close * sl_percent / 100)
+tp_distance = sl_distance * rr_ratio
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STRATEGIE-AUSFÜHRUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === EOD Close ===
+if should_close_eod and strategy.position_size != 0
+    strategy.close_all(comment="EOD Close")
+
+// === Long Entry ===
+if long_signal and strategy.position_size == 0 and not should_close_eod
+    entry = close
+    sl = entry - sl_distance
+    tp = entry + tp_distance
+    
+    label_text = strong_long ? "STRONG LONG" : "Long"
+    strategy.entry("Long", strategy.long, comment=label_text)
+    
+    if use_trailing
+        strategy.exit("Long Exit", "Long", stop=sl, trail_price=entry + (sl_distance * 0.5), trail_offset=sl_distance * trail_percent / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    
+    trades_today += 1
+
+// === Short Entry ===
+if short_signal and strategy.position_size == 0 and not should_close_eod
+    entry = close
+    sl = entry + sl_distance
+    tp = entry - tp_distance
+    
+    label_text = strong_short ? "STRONG SHORT" : "Short"
+    strategy.entry("Short", strategy.short, comment=label_text)
+    
+    if use_trailing
+        strategy.exit("Short Exit", "Short", stop=sl, trail_price=entry - (sl_distance * 0.5), trail_offset=sl_distance * trail_percent / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    
+    trades_today += 1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALISIERUNG
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === VWAP ===
+plot(vwap_val, "VWAP", color=color.new(color.purple, 30), linewidth=2)
+
+// === EMAs ===
+plot(ema_fast_val, "EMA Fast", color=color.new(color.blue, 50), linewidth=1)
+plot(ema_slow_val, "EMA Slow", color=color.new(color.orange, 50), linewidth=1)
+
+// === Fibonacci Levels ===
+plot(show_fib ? fib_236 : na, "Fib 23.6%", color=color.new(color.gray, 70), linewidth=1, style=plot.style_circles)
+plot(show_fib ? fib_382 : na, "Fib 38.2%", color=color.new(color.green, 60), linewidth=1, style=plot.style_circles)
+plot(show_fib ? fib_500 : na, "Fib 50.0%", color=color.new(color.yellow, 50), linewidth=2, style=plot.style_circles)
+plot(show_fib ? fib_618 : na, "Fib 61.8%", color=color.new(color.red, 60), linewidth=1, style=plot.style_circles)
+plot(show_fib ? fib_786 : na, "Fib 78.6%", color=color.new(color.purple, 70), linewidth=1, style=plot.style_circles)
+
+// === Entry Signale ===
+plotshape(long_signal and strategy.position_size[1] == 0 and not strong_long, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(short_signal and strategy.position_size[1] == 0 and not strong_short, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// === Starke Signale ===
+plotshape(strong_long and strategy.position_size[1] == 0, "Strong Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(strong_short and strategy.position_size[1] == 0, "Strong Short", shape.triangledown, location.abovebar, color.fuchsia, size=size.normal)
+
+// === Session Background ===
+bgcolor(not session_ok ? color.new(color.gray, 95) : na, title="Außerhalb Session")
+bgcolor(is_lunch and avoid_lunch ? color.new(color.orange, 95) : na, title="Lunch-Zeit")
+
+// === Oversold/Overbought Zones ===
+bgcolor(is_oversold_move and rsi_oversold_cond ? color.new(color.green, 92) : na, title="Oversold Zone")
+bgcolor(is_overbought_move and rsi_overbought_cond ? color.new(color.red, 92) : na, title="Overbought Zone")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO-DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dashboard = table.new(position.top_right, 2, 12, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    // Header
+    table.cell(dashboard, 0, 0, "📊 15M REVERSAL", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 70))
+    table.cell(dashboard, 1, 0, "STATUS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 70))
+    
+    // RSI
+    rsi_col = rsi_oversold_cond ? color.green : rsi_overbought_cond ? color.red : color.gray
+    table.cell(dashboard, 0, 1, "RSI (" + str.tostring(rsi_length) + ")", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 1, str.tostring(rsi_val, "#.#"), text_color=rsi_col, text_size=size.tiny)
+    
+    // Bewegung
+    move_col = is_oversold_move ? color.green : is_overbought_move ? color.red : color.gray
+    table.cell(dashboard, 0, 2, "Move (" + str.tostring(lookback_bars) + " bars)", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 2, str.tostring(price_change, "#.##") + "%", text_color=move_col, text_size=size.tiny)
+    
+    // Schwelle
+    table.cell(dashboard, 0, 3, "Schwelle", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 3, "±" + str.tostring(effective_threshold, "#.##") + "%", text_color=color.orange, text_size=size.tiny)
+    
+    // VWAP
+    vwap_status = below_vwap ? "↓ Unter" : above_vwap ? "↑ Über" : "≈ Neutral"
+    vwap_col = below_vwap ? color.green : above_vwap ? color.red : color.gray
+    table.cell(dashboard, 0, 4, "VWAP", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 4, vwap_status, text_color=vwap_col, text_size=size.tiny)
+    
+    // Trend
+    trend_text = uptrend ? "↑ Bullish" : downtrend ? "↓ Bearish" : "→ Neutral"
+    trend_col = uptrend ? color.green : downtrend ? color.red : color.gray
+    table.cell(dashboard, 0, 5, "Trend", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 5, trend_text, text_color=trend_col, text_size=size.tiny)
+    
+    // Volumen
+    vol_text = high_volume ? "✓ Hoch" : "○ Normal"
+    vol_col = high_volume ? color.green : color.gray
+    table.cell(dashboard, 0, 6, "Volumen", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 6, vol_text + " (" + str.tostring(rvol, "#.#") + "x)", text_color=vol_col, text_size=size.tiny)
+    
+    // Session
+    sess_text = session_ok ? "✓ Aktiv" : "✗ Inaktiv"
+    sess_col = session_ok ? color.green : color.red
+    table.cell(dashboard, 0, 7, "Session", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 7, sess_text, text_color=sess_col, text_size=size.tiny)
+    
+    // Trades heute
+    trades_col = trades_today >= max_trades_day ? color.red : color.green
+    table.cell(dashboard, 0, 8, "Trades heute", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 8, str.tostring(trades_today) + "/" + str.tostring(max_trades_day), text_color=trades_col, text_size=size.tiny)
+    
+    // Aktuelles Signal
+    sig_text = strong_long ? "⭐ STRONG LONG" : strong_short ? "⭐ STRONG SHORT" : long_signal ? "🟢 Long" : short_signal ? "🔴 Short" : "⚪ Keins"
+    sig_col = long_signal or strong_long ? color.green : short_signal or strong_short ? color.red : color.gray
+    table.cell(dashboard, 0, 9, "Signal", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 9, sig_text, text_color=sig_col, text_size=size.tiny)
+    
+    // Position
+    pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_col = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dashboard, 0, 10, "Position", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 10, pos_text, text_color=pos_col, text_size=size.tiny)
+    
+    // ATR
+    table.cell(dashboard, 0, 11, "ATR (14)", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 11, str.tostring(atr_value, "#.##") + " (" + str.tostring(atr_percent, "#.##") + "%)", text_color=color.orange, text_size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+if long_signal and strategy.position_size[1] == 0
+    alert_msg = strong_long ? "⭐🟢 STRONG LONG" : "🟢 LONG"
+    alert(alert_msg + " | RSI: " + str.tostring(rsi_val, "#.#") + " | Move: " + str.tostring(price_change, "#.##") + "% | VWAP: " + (below_vwap ? "Below" : "Above"), alert.freq_once_per_bar)
+
+if short_signal and strategy.position_size[1] == 0
+    alert_msg = strong_short ? "⭐🔴 STRONG SHORT" : "🔴 SHORT"
+    alert(alert_msg + " | RSI: " + str.tostring(rsi_val, "#.#") + " | Move: " + str.tostring(price_change, "#.##") + "% | VWAP: " + (above_vwap ? "Above" : "Below"), alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENDE
+// ══════════════════════════════════════════════════════════════════════════════
